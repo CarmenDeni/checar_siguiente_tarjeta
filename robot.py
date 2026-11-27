@@ -264,9 +264,10 @@ def ciclo(nav: Navegador):
         return
 
     if MODO_PRUEBA:
-        log("MODO PRUEBA: aquí mandaría «siguiente tarjeta»")
-        E["ultimo_estado"] = "Modo prueba: habría mandado"
-        E["ultimo_enviado"] = d["huella"]
+        if E.get("prueba_huella") != d["huella"]:
+            log("MODO PRUEBA: aquí mandaría «siguiente tarjeta»")
+            E["prueba_huella"] = d["huella"]
+        E["ultimo_estado"] = "Modo prueba: habría mandado (no mandé nada)"
         return
 
     log("Cursor libre → mando siguiente tarjeta. Respuesta:", d["cabecera"])
