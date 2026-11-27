@@ -20,8 +20,8 @@ ENV = os.environ.get
 BASE = ENV("KOKORA_URL", "https://kokora.mx").rstrip("/")
 CONV = ENV("CONVERSACION", "plan-plataforma-2")
 PAGE_URL = f"{BASE}/admin/cursor?c={CONV}"
-USUARIO = ENV("KOKORA_USUARIO", "admin")
-PASSWORD = ENV("KOKORA_PASSWORD", "")
+USUARIO = ENV("KOKORA_USUARIO", "admin").strip().strip('"\'')
+PASSWORD = ENV("KOKORA_PASSWORD", "").strip().strip('"\'')
 PHONE = ENV("CALLMEBOT_PHONE", "")
 APIKEY = ENV("CALLMEBOT_APIKEY", "")
 CLAVE = ENV("CLAVE_ADMIN", "")
@@ -198,10 +198,13 @@ class Navegador:
             pass
         pg.get_by_role("button", name=re.compile("Entrar", re.I)).click()
         pg.wait_for_timeout(4000)
+        aviso = " ".join(pg.inner_text("body").split())[-200:]
         pg.goto(PAGE_URL, wait_until="domcontentloaded")
         pg.wait_for_timeout(2500)
         if "cursor" not in pg.url:
-            raise RuntimeError("No pude entrar al admin: revisa usuario/contraseña")
+            pista = "la página dice «Credenciales incorrectas»" if "incorrecta" in plano(aviso) else f"la página dice: {aviso}"
+            raise RuntimeError(f"No pude entrar al admin como «{USUARIO}» "
+                               f"(contraseña de {len(PASSWORD)} caracteres): {pista}")
 
     def mandar(self, mensaje: str):
         pg = self.page
