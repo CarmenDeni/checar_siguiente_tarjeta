@@ -27,6 +27,10 @@ for chat in "${CHATS[@]}"; do
     echo "✗ $repo: no encontré $carpeta/conversaciones/_app/chat.py"
     continue
   fi
+  rama=$(git -C "$carpeta" branch --show-current)
+  [ "$rama" != "main" ] && echo "  ⚠ $repo está en la rama «$rama», no en main: puede verse una versión vieja"
+  (cd "$carpeta" && python3 conversaciones/_app/chat.py sincronizar > "/tmp/vigilante-$repo-sync.log" 2>&1) \
+    || echo "  ⚠ $repo: no pude actualizarlo, mira /tmp/vigilante-$repo-sync.log"
   (cd "$carpeta" && python3 conversaciones/_app/chat.py ui --puerto "$puerto" --no-abrir) \
     > "/tmp/vigilante-$repo.log" 2>&1 &
   pids+=($!)

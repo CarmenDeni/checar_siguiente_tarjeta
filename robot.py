@@ -60,7 +60,8 @@ def cargar_estado():
     base = {"pausado": False, "ultimo_enviado": None, "alerta_de": None, "ultima_alerta": 0,
             "envios": [], "fallas": 0, "ultima_revision": None, "ultimo_estado": "arrancando",
             "pendientes_noche": [], "prueba": MODO_PRUEBA, "avisos": True, "silencio_on": True,
-            "alerta_noche": True}
+            "alerta_noche": True, "pausa_hasta": 0, "pausado_desde": 0, "recordar_horas": 0,
+            "ultimo_recordatorio": 0}
     try:
         with open(ESTADO_ARCHIVO) as f:
             base.update(json.load(f))
@@ -307,6 +308,30 @@ def ciclo(nav: Navegador):
         raise RuntimeError("Piqué «Mandar a Cursor» pero la página no confirmó el envío")
 
 
+def revisar_pausa():
+    ahora = time.time()
+    if not E["pausado"]:
+        return
+    if E.get("pausa_hasta") and ahora >= E["pausa_hasta"]:
+        E["pausado"], E["pausa_hasta"] = False, 0
+        E["aviso_panel"] = datetime.now(TZ).strftime("%H:%M") + " Se acabó la pausa: el robot volvió a trabajar."
+        log("fin de la pausa programada")
+        return
+    horas = E.get("recordar_horas") or 0
+    desde = max(E.get("pausado_desde") or ahora, E.get("ultimo_recordatorio") or 0)
+    if horas and not E.get("pausa_hasta") and not es_silencio() and ahora - desde >= horas * 3600:
+        E["ultimo_recordatorio"] = ahora
+        total = (ahora - (E.get("pausado_desde") or ahora)) / 3600
+        whatsapp(f"⏰ El robot siguiente tarjeta lleva {total:.1f} h pausado. ¿Lo vuelves a prender?")
+
+
+def pausar(horas=0):
+    E["pausado"] = True
+    E["pausado_desde"] = time.time()
+    E["ultimo_recordatorio"] = 0
+    E["pausa_hasta"] = time.time() + horas * 3600 if horas else 0
+
+
 def bucle():
     nav = None
     while True:
@@ -317,6 +342,7 @@ def bucle():
                 if not es_silencio() and E["pendientes_noche"]:
                     whatsapp("⚠️ Robot siguiente tarjeta, en la noche pasó:\n- " + "\n- ".join(E["pendientes_noche"]))
                     E["pendientes_noche"] = []
+                revisar_pausa()
                 ciclo(nav)
         except Exception as ex:
             E["fallas"] += 1
@@ -351,6 +377,7 @@ main{max-width:520px;margin:auto} h1{font-size:20px}
 .accion.llena{background:#7b6cc4;color:#fff}
 input[type=password]{width:100%;box-sizing:border-box;padding:12px;font-size:16px;border:1px solid #ccc;border-radius:10px}
 .aviso{background:#eee9fb;color:#3d2f86}
+.num{width:64px;padding:6px;font-size:16px;border:1px solid #ccc;border-radius:8px}
 .estado{font-size:17px;font-weight:600} .err{color:#b3261e}
 </style></head><body><main>"""
 
@@ -408,9 +435,32 @@ class Control(BaseHTTPRequestHandler):
             return self.panel()
         if u.path == "/accion" and self.command == "POST":
             que = q.get("que", [""])[0]
-            if que in INTERRUPTORES:
-                E[que] = not E.get(que, INTERRUPTORES[que][2])
+            datos = urllib.parse.parse_qs(self.rfile.read(int(self.headers.get("Content-Length", 0) or 0)).decode())
+
+            def numero(nombre):
+                try:
+                    return max(0.0, min(720.0, float(datos.get(nombre, ["0"])[0].replace(",", "."))))
+                except ValueError:
+                    return 0.0
             hora = datetime.now(TZ).strftime("%H:%M")
+            if que == "pausado":
+                if E["pausado"]:
+                    E["pausado"], E["pausa_hasta"] = False, 0
+                else:
+                    pausar()
+            elif que in INTERRUPTORES:
+                E[que] = not E.get(que, INTERRUPTORES[que][2])
+            elif que == "pausar_horas":
+                h = numero("horas")
+                if h:
+                    pausar(h)
+                    fin = datetime.fromtimestamp(E["pausa_hasta"], TZ).strftime("%d/%m %H:%M")
+                    E["aviso_panel"] = f"{hora} Pausado {h:g} h: vuelve solo el {fin}."
+            elif que == "recordar":
+                E["recordar_horas"] = numero("horas")
+                E["aviso_panel"] = (f"{hora} Si lo pausas sin hora de regreso, te recuerdo por WhatsApp "
+                                    f"cada {E['recordar_horas']:g} h." if E["recordar_horas"] else
+                                    f"{hora} Recordatorio de pausa apagado.")
             if que == "revisar":
                 E["aviso_panel"] = f"{hora} Pediste revisar: en unos segundos cambia «última revisión»."
                 despertar.set()
@@ -428,7 +478,7 @@ class Control(BaseHTTPRequestHandler):
             self.send_header("Location", "/panel")
             return self.end_headers()
         if u.path == "/pausar":
-            E["pausado"] = True
+            pausar()
         elif u.path == "/reanudar":
             E["pausado"] = False
             despertar.set()
@@ -472,6 +522,13 @@ class Control(BaseHTTPRequestHandler):
         lec = E.get("ultima_lectura") or {}
         cursor = "libre" if lec.get("libre") else "trabajando" if lec.get("ocupado") else "sin dato"
         esc = html.escape
+        pausa_txt = ""
+        if E["pausado"] and E.get("pausa_hasta"):
+            fin = datetime.fromtimestamp(E["pausa_hasta"], TZ).strftime("%d/%m %H:%M")
+            pausa_txt = f"<small>Pausado hasta el {fin}; luego vuelve solo.</small>"
+        elif E["pausado"] and E.get("pausado_desde"):
+            ini = datetime.fromtimestamp(E["pausado_desde"], TZ).strftime("%d/%m %H:%M")
+            pausa_txt = f"<small>Pausado desde el {ini}, sin hora de regreso.</small>"
         cuerpo = f"""<h1>Robot «siguiente tarjeta»</h1>
 <div class="card"><div class="estado {"err" if E["fallas"] else ""}">{esc(str(E["ultimo_estado"]))}</div>
 <small>Cursor: {cursor} · última revisión {esc(str(E.get("ultima_revision") or "—"))[11:16]}
@@ -481,7 +538,16 @@ class Control(BaseHTTPRequestHandler):
 <div class="card"><b>Cursor activado con éxito</b><small>Hoy: {E.get("exitos_dia", {}).get(datetime.now(TZ).strftime("%Y-%m-%d"), 0)}
 · desde que arrancó el robot: {E.get("exitos_total", 0)}</small>
 <small>Último WhatsApp: {esc(E.get("ultimo_wa") or "ninguno todavía")}</small></div>
-<div class="card">{filas}</div><div class="card">{botones}</div>
+<div class="card">{filas}</div>
+<div class="card"><b>Pausas</b>{pausa_txt}
+<form method="post" action="/accion?que=pausar_horas" class="fila"><div>Pausar solo por
+<input name="horas" type="number" min="0.5" step="0.5" value="2" class="num"> horas</div>
+<button class="sw on">Pausar</button></form>
+<form method="post" action="/accion?que=recordar" class="fila"><div>Si lo pauso sin hora de regreso, recuérdame cada
+<input name="horas" type="number" min="0" step="0.5" value="{E.get("recordar_horas") or 0:g}" class="num"> horas
+<small>0 = sin recordatorio. Respeta el silencio de 22 a 7.</small></div>
+<button class="sw on">Guardar</button></form></div>
+<div class="card">{botones}</div>
 <small>Se actualiza solo cada 30 s · <a href="/salir">Salir</a></small><script>setTimeout(()=>location.reload(),30000)</script>"""
         self.pagina(cuerpo)
 
