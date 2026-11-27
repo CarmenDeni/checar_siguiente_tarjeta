@@ -22,7 +22,11 @@ Entra con tu usuario y contraseña del admin usando un navegador Chromium sin pa
 
 Al arrancar te llega «✅ Robot siguiente tarjeta encendido y vigilando».
 
-## Control remoto (desde el celular)
+## Panel en el celular
+
+Abre `https://TU-ROBOT.up.railway.app/`, escribe tu `CLAVE_ADMIN` y deja marcado «Recordarme». Ahí puedes pausar, poner modo prueba, apagar los WhatsApp, el silencio de noche y la 🚨 nocturna, y picar «Revisar ahora», «Probar WhatsApp» o «Volver a mandar». Para tenerlo como app: en Safari, Compartir → Agregar a pantalla de inicio.
+
+## Control remoto por enlace
 
 Cambia `TU-ROBOT` por tu dominio de Railway y `CLAVE` por tu `CLAVE_ADMIN`:
 

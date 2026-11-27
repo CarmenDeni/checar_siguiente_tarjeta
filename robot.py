@@ -1,6 +1,7 @@
 """Robot que vigila https://kokora.mx/admin/cursor y manda «siguiente tarjeta» cuando Cursor queda libre."""
 
 import hashlib
+import html
 import json
 import os
 import re
@@ -58,7 +59,8 @@ def log(*a):
 def cargar_estado():
     base = {"pausado": False, "ultimo_enviado": None, "alerta_de": None, "ultima_alerta": 0,
             "envios": [], "fallas": 0, "ultima_revision": None, "ultimo_estado": "arrancando",
-            "pendientes_noche": []}
+            "pendientes_noche": [], "prueba": MODO_PRUEBA, "avisos": True, "silencio_on": True,
+            "alerta_noche": True}
     try:
         with open(ESTADO_ARCHIVO) as f:
             base.update(json.load(f))
@@ -68,6 +70,8 @@ def cargar_estado():
 
 
 E = cargar_estado()
+if MODO_PRUEBA:
+    E["prueba"] = True
 
 
 def guardar():
@@ -79,15 +83,17 @@ def guardar():
 
 
 def es_silencio() -> bool:
+    if not E.get("silencio_on", True):
+        return False
     h = datetime.now(TZ).hour
     if SILENCIO_DESDE > SILENCIO_HASTA:
         return h >= SILENCIO_DESDE or h < SILENCIO_HASTA
     return SILENCIO_DESDE <= h < SILENCIO_HASTA
 
 
-def whatsapp(texto: str) -> bool:
+def whatsapp(texto: str, forzar: bool = False) -> bool:
     log("WHATSAPP:", texto)
-    if not (PHONE and APIKEY):
+    if not (PHONE and APIKEY) or not (forzar or E.get("avisos", True)):
         return False
     url = "https://api.callmebot.com/whatsapp.php?" + urllib.parse.urlencode(
         {"phone": PHONE, "text": texto, "apikey": APIKEY})
@@ -239,7 +245,10 @@ def ciclo(nav: Navegador):
         E["ultimo_estado"] = "Esperándote: Cursor pidió REVISA AHORA"
         if E["alerta_de"] != d["huella"]:
             E["alerta_de"], E["ultima_alerta"] = d["huella"], time.time()
-            whatsapp(ALERTA_ATENCION)
+            if E.get("alerta_noche", True) or not es_silencio():
+                whatsapp(ALERTA_ATENCION)
+            else:
+                E["ultima_alerta"] = 0
         elif not es_silencio() and time.time() - E["ultima_alerta"] > REPETIR_ALERTA_MIN * 60:
             E["ultima_alerta"] = time.time()
             whatsapp(ALERTA_ATENCION + " (recordatorio)")
@@ -263,7 +272,7 @@ def ciclo(nav: Navegador):
         aviso_falla(f"Llegué al límite de {MAX_ENVIOS_HORA} envíos por hora; pauso hasta que baje.")
         return
 
-    if MODO_PRUEBA:
+    if E.get("prueba"):
         if E.get("prueba_huella") != d["huella"]:
             log("MODO PRUEBA: aquí mandaría «siguiente tarjeta»")
             E["prueba_huella"] = d["huella"]
@@ -307,6 +316,42 @@ def bucle():
         despertar.clear()
 
 
+def galleta():
+    return hashlib.sha256(("robot:" + CLAVE).encode()).hexdigest()[:32]
+
+
+CABEZA = """<!doctype html><html lang="es"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="apple-mobile-web-app-capable" content="yes"><meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="Robot tarjeta"><title>Robot tarjeta</title><style>
+body{font-family:system-ui,sans-serif;background:#f5f3ef;margin:0;padding:16px;color:#222}
+main{max-width:520px;margin:auto} h1{font-size:20px}
+.card{background:#fff;border-radius:14px;padding:14px;margin:12px 0;box-shadow:0 1px 3px #0001}
+.fila{display:flex;justify-content:space-between;align-items:center;gap:12px;padding:10px 0;border-bottom:1px solid #eee}
+.fila:last-child{border:0} small{display:block;color:#777;margin-top:2px}
+.sw{min-width:64px;padding:8px;border-radius:20px;border:0;background:#ddd;font-weight:600}
+.sw.on{background:#7b6cc4;color:#fff}
+.accion{width:100%;padding:12px;margin:4px 0;border-radius:10px;border:1px solid #7b6cc4;background:#fff;color:#5a4aa8;font-size:15px}
+.accion.llena{background:#7b6cc4;color:#fff}
+input[type=password]{width:100%;box-sizing:border-box;padding:12px;font-size:16px;border:1px solid #ccc;border-radius:10px}
+.estado{font-size:17px;font-weight:600} .err{color:#b3261e}
+</style></head><body><main>"""
+
+LOGIN = """<h1>Robot «siguiente tarjeta»</h1><form method="post" action="/entrar" class="card">
+<label>Contraseña<br><input type="password" name="clave" autocomplete="current-password" autofocus></label>
+<p><label><input type="checkbox" name="recordar" checked> Recordarme en este celular</label></p>
+{error}<button class="accion llena">Entrar</button></form>"""
+
+
+INTERRUPTORES = {
+    "pausado": ("Pausar envíos", "Sigue vigilando pero no manda «siguiente tarjeta».", False),
+    "prueba": ("Modo prueba", "Solo anota lo que haría, no manda nada.", False),
+    "avisos": ("Avisos por WhatsApp", "Apágalo para que no te llegue ningún WhatsApp.", True),
+    "silencio_on": ("Silencio de noche (22–7)", "Los avisos de falla esperan a las 7 am.", True),
+    "alerta_noche": ("🚨 también de noche", "Si está en No, la alerta de atención espera a las 7 am.", True),
+}
+
+
 class Control(BaseHTTPRequestHandler):
     def log_message(self, *a):
         pass
@@ -321,10 +366,43 @@ class Control(BaseHTTPRequestHandler):
     def manejar(self):
         u = urllib.parse.urlparse(self.path)
         q = urllib.parse.parse_qs(u.query)
-        if u.path in ("/", "/salud"):
+        if u.path == "/salud":
             return self.responder(200, {"ok": True})
-        if not CLAVE or q.get("clave", [""])[0] != CLAVE:
+        if u.path == "/entrar" and self.command == "POST":
+            datos = urllib.parse.parse_qs(self.rfile.read(int(self.headers.get("Content-Length", 0))).decode())
+            if CLAVE and datos.get("clave", [""])[0] == CLAVE:
+                edad = "; Max-Age=31536000" if datos.get("recordar") else ""
+                self.send_response(303)
+                self.send_header("Set-Cookie", f"robot={galleta()}; Path=/; HttpOnly; Secure; SameSite=Strict{edad}")
+                self.send_header("Location", "/panel")
+                return self.end_headers()
+            return self.pagina(LOGIN.format(error="<p class='err'>Contraseña incorrecta</p>"))
+        if u.path == "/salir":
+            self.send_response(303)
+            self.send_header("Set-Cookie", "robot=; Path=/; Max-Age=0")
+            self.send_header("Location", "/")
+            return self.end_headers()
+        if not self.autorizado(q):
+            if u.path in ("/", "/panel"):
+                return self.pagina(LOGIN.format(error=""))
             return self.responder(403, {"error": "clave incorrecta"})
+        if u.path in ("/", "/panel"):
+            return self.panel()
+        if u.path == "/accion" and self.command == "POST":
+            que = q.get("que", [""])[0]
+            if que in INTERRUPTORES:
+                E[que] = not E.get(que, INTERRUPTORES[que][2])
+            elif que == "revisar":
+                despertar.set()
+            elif que == "probar_wa":
+                threading.Thread(target=whatsapp, args=("✅ Robot siguiente tarjeta: prueba de aviso", True)).start()
+            elif que == "reenviar":
+                E["ultimo_enviado"] = None
+                despertar.set()
+            guardar()
+            self.send_response(303)
+            self.send_header("Location", "/panel")
+            return self.end_headers()
         if u.path == "/pausar":
             E["pausado"] = True
         elif u.path == "/reanudar":
@@ -333,7 +411,7 @@ class Control(BaseHTTPRequestHandler):
         elif u.path in ("/aviso", "/revisar"):
             despertar.set()
         elif u.path == "/prueba-whatsapp":
-            whatsapp("✅ Robot siguiente tarjeta: prueba de aviso")
+            whatsapp("✅ Robot siguiente tarjeta: prueba de aviso", forzar=True)
         elif u.path != "/estado":
             return self.responder(404, {"error": "no existe"})
         guardar()
@@ -341,6 +419,43 @@ class Control(BaseHTTPRequestHandler):
         vista["ultima_lectura"] = E.get("ultima_lectura")
         vista["silencio_ahora"] = es_silencio()
         self.responder(200, vista)
+
+    def autorizado(self, q):
+        if CLAVE and q.get("clave", [""])[0] == CLAVE:
+            return True
+        galletas = self.headers.get("Cookie") or ""
+        return bool(CLAVE) and f"robot={galleta()}" in galletas.replace(" ", "").split(";")
+
+    def pagina(self, cuerpo):
+        b = (CABEZA + cuerpo + "</main></body></html>").encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self.wfile.write(b)
+
+    def panel(self):
+        filas = ""
+        for k, (titulo, ayuda, defecto) in INTERRUPTORES.items():
+            on = E.get(k, defecto)
+            filas += (f'<form method="post" action="/accion?que={k}" class="fila"><div><b>{titulo}</b>'
+                      f'<small>{ayuda}</small></div><button class="sw {"on" if on else ""}">'
+                      f'{"Sí" if on else "No"}</button></form>')
+        botones = "".join(
+            f'<form method="post" action="/accion?que={k}"><button class="accion">{t}</button></form>'
+            for k, t in (("revisar", "Revisar ahora"), ("probar_wa", "Probar WhatsApp"),
+                         ("reenviar", "Volver a mandar «siguiente tarjeta»")))
+        lec = E.get("ultima_lectura") or {}
+        cursor = "libre" if lec.get("libre") else "trabajando" if lec.get("ocupado") else "sin dato"
+        esc = html.escape
+        cuerpo = f"""<h1>Robot «siguiente tarjeta»</h1>
+<div class="card"><div class="estado {"err" if E["fallas"] else ""}">{esc(str(E["ultimo_estado"]))}</div>
+<small>Cursor: {cursor} · última revisión {esc(str(E.get("ultima_revision") or "—"))[11:16]}
+· fallas seguidas: {E["fallas"]}{" · horario de silencio" if es_silencio() else ""}</small>
+<small>Respuesta más nueva: {esc(str(lec.get("cabecera") or "—"))}<br>{esc((lec.get("inicio") or "")[:120])}</small></div>
+<div class="card">{filas}</div><div class="card">{botones}</div>
+<small>Se actualiza solo cada 30 s · <a href="/salir">Salir</a></small><script>setTimeout(()=>location.reload(),30000)</script>"""
+        self.pagina(cuerpo)
 
     do_GET = manejar
     do_POST = manejar
