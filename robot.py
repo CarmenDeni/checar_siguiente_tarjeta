@@ -197,7 +197,12 @@ class Navegador:
         except Exception:
             pass
         pg.get_by_role("button", name=re.compile("Entrar", re.I)).click()
-        pg.wait_for_timeout(4000)
+        for _ in range(45):
+            pg.wait_for_timeout(1000)
+            cuerpo = plano(pg.inner_text("body"))
+            if "incorrecta" in cuerpo or pg.locator("input[type=password]").count() == 0:
+                break
+        pg.wait_for_timeout(1500)
         aviso = " ".join(pg.inner_text("body").split())[-200:]
         pg.goto(PAGE_URL, wait_until="domcontentloaded")
         pg.wait_for_timeout(2500)
