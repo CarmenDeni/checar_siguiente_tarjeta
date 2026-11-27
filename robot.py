@@ -93,18 +93,31 @@ def es_silencio() -> bool:
 
 def whatsapp(texto: str, forzar: bool = False) -> bool:
     log("WHATSAPP:", texto)
-    if not (PHONE and APIKEY) or not (forzar or E.get("avisos", True)):
+    hora = datetime.now(TZ).strftime("%H:%M")
+    if not (PHONE and APIKEY):
+        E["ultimo_wa"] = f"{hora} ❌ No mandé: falta CALLMEBOT_PHONE o CALLMEBOT_APIKEY en Railway"
+        return False
+    if not (forzar or E.get("avisos", True)):
+        E["ultimo_wa"] = f"{hora} No mandé: los avisos por WhatsApp están apagados"
         return False
     url = "https://api.callmebot.com/whatsapp.php?" + urllib.parse.urlencode(
         {"phone": PHONE, "text": texto, "apikey": APIKEY})
-    for intento in range(3):
+    motivo = ""
+    for intento in range(1 if forzar else 3):
         try:
-            with urllib.request.urlopen(url, timeout=30) as r:
-                if r.status == 200:
-                    return True
+            with urllib.request.urlopen(url, timeout=25) as r:
+                cuerpo = r.read(3000).decode("utf-8", "ignore")
+            limpio = " ".join(re.sub(r"<[^>]+>", " ", cuerpo).split())
+            if "error" not in limpio.lower() and "invalid" not in limpio.lower():
+                E["ultimo_wa"] = f"{hora} ✅ CallMeBot lo aceptó"
+                return True
+            motivo = limpio[:160]
         except Exception as ex:
+            motivo = str(ex)[:160]
             log("callmebot falló:", ex)
-        time.sleep(5 * (intento + 1))
+        if not forzar:
+            time.sleep(5 * (intento + 1))
+    E["ultimo_wa"] = f"{hora} ❌ CallMeBot no lo mandó: {motivo}"
     return False
 
 
@@ -285,6 +298,9 @@ def ciclo(nav: Navegador):
     if d2["ocupado"] or d2["primero"] == "tu":
         E["ultimo_enviado"], E["enviado_en"] = d["huella"], ahora
         E["envios"].append(ahora)
+        hoy = datetime.now(TZ).strftime("%Y-%m-%d")
+        E["exitos_total"] = E.get("exitos_total", 0) + 1
+        E["exitos_dia"] = {hoy: E.get("exitos_dia", {}).get(hoy, 0) + 1}
         E["ultimo_estado"] = "Mandé siguiente tarjeta"
         log("envío confirmado")
     else:
@@ -334,6 +350,7 @@ main{max-width:520px;margin:auto} h1{font-size:20px}
 .accion{width:100%;padding:12px;margin:4px 0;border-radius:10px;border:1px solid #7b6cc4;background:#fff;color:#5a4aa8;font-size:15px}
 .accion.llena{background:#7b6cc4;color:#fff}
 input[type=password]{width:100%;box-sizing:border-box;padding:12px;font-size:16px;border:1px solid #ccc;border-radius:10px}
+.aviso{background:#eee9fb;color:#3d2f86}
 .estado{font-size:17px;font-weight:600} .err{color:#b3261e}
 </style></head><body><main>"""
 
@@ -344,11 +361,12 @@ LOGIN = """<h1>Robot «siguiente tarjeta»</h1><form method="post" action="/entr
 
 
 INTERRUPTORES = {
-    "pausado": ("Pausar envíos", "Sigue vigilando pero no manda «siguiente tarjeta».", False),
-    "prueba": ("Modo prueba", "Solo anota lo que haría, no manda nada.", False),
-    "avisos": ("Avisos por WhatsApp", "Apágalo para que no te llegue ningún WhatsApp.", True),
-    "silencio_on": ("Silencio de noche (22–7)", "Los avisos de falla esperan a las 7 am.", True),
-    "alerta_noche": ("🚨 también de noche", "Si está en No, la alerta de atención espera a las 7 am.", True),
+    "pausado": ("Pausar el robot", "Sí = deja de mandar «siguiente tarjeta» (sigue mirando la página).", False),
+    "prueba": ("Modo prueba", "Sí = solo dice lo que haría, no manda nada a Cursor.", False),
+    "avisos": ("Mandarme WhatsApp", "Te escribe solo si Cursor pide «REVISA AHORA» (🚨) o si el robot se traba. "
+               "No = ningún WhatsApp.", True),
+    "silencio_on": ("Callar avisos de falla de 22 a 7", "Sí = si se traba de noche, te lo cuenta a las 7 am.", True),
+    "alerta_noche": ("La 🚨 sí me despierta", "Sí = la 🚨 llega aunque sea de noche. No = espera a las 7 am.", True),
 }
 
 
@@ -392,12 +410,18 @@ class Control(BaseHTTPRequestHandler):
             que = q.get("que", [""])[0]
             if que in INTERRUPTORES:
                 E[que] = not E.get(que, INTERRUPTORES[que][2])
-            elif que == "revisar":
+            hora = datetime.now(TZ).strftime("%H:%M")
+            if que == "revisar":
+                E["aviso_panel"] = f"{hora} Pediste revisar: en unos segundos cambia «última revisión»."
                 despertar.set()
             elif que == "probar_wa":
-                threading.Thread(target=whatsapp, args=("✅ Robot siguiente tarjeta: prueba de aviso", True)).start()
+                whatsapp("✅ Robot siguiente tarjeta: prueba de aviso", forzar=True)
+                E["aviso_panel"] = "Prueba de WhatsApp: " + E.get("ultimo_wa", "")
             elif que == "reenviar":
                 E["ultimo_enviado"] = None
+                libre = (E.get("ultima_lectura") or {}).get("libre")
+                E["aviso_panel"] = (f"{hora} Mandaré «siguiente tarjeta» ahora mismo." if libre else
+                                    f"{hora} Cursor está trabajando: lo mandaré en cuanto quede libre.")
                 despertar.set()
             guardar()
             self.send_response(303)
@@ -453,6 +477,10 @@ class Control(BaseHTTPRequestHandler):
 <small>Cursor: {cursor} · última revisión {esc(str(E.get("ultima_revision") or "—"))[11:16]}
 · fallas seguidas: {E["fallas"]}{" · horario de silencio" if es_silencio() else ""}</small>
 <small>Respuesta más nueva: {esc(str(lec.get("cabecera") or "—"))}<br>{esc((lec.get("inicio") or "")[:120])}</small></div>
+{f'<div class="card aviso">{esc(E["aviso_panel"])}</div>' if E.get("aviso_panel") else ""}
+<div class="card"><b>Cursor activado con éxito</b><small>Hoy: {E.get("exitos_dia", {}).get(datetime.now(TZ).strftime("%Y-%m-%d"), 0)}
+· desde que arrancó el robot: {E.get("exitos_total", 0)}</small>
+<small>Último WhatsApp: {esc(E.get("ultimo_wa") or "ninguno todavía")}</small></div>
 <div class="card">{filas}</div><div class="card">{botones}</div>
 <small>Se actualiza solo cada 30 s · <a href="/salir">Salir</a></small><script>setTimeout(()=>location.reload(),30000)</script>"""
         self.pagina(cuerpo)
@@ -465,8 +493,6 @@ def main():
     log(f"Robot arrancó. Vigilo {PAGE_URL} cada {INTERVALO}s. Modo prueba: {MODO_PRUEBA}")
     srv = ThreadingHTTPServer(("0.0.0.0", int(ENV("PORT", "8000"))), Control)
     threading.Thread(target=srv.serve_forever, daemon=True).start()
-    if not es_silencio():
-        whatsapp("✅ Robot siguiente tarjeta encendido y vigilando.")
     bucle()
 
 

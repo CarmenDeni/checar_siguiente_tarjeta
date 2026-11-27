@@ -20,7 +20,7 @@ Entra con tu usuario y contraseña del admin usando un navegador Chromium sin pa
    - `CLAVE_ADMIN` = cualquier palabra secreta para el control remoto
 3. En **Settings → Networking → Generate Domain**. Opcional: en **Volumes** agrega un volumen montado en `/data` para que recuerde su estado entre reinicios.
 
-Al arrancar te llega «✅ Robot siguiente tarjeta encendido y vigilando».
+WhatsApp solo te llega si Cursor pide «REVISA AHORA» (🚨) o si el robot se traba.
 
 ## Panel en el celular
 
